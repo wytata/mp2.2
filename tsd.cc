@@ -31,24 +31,21 @@
  *
  */
 
-#include <cstddef>
-#include <cstdlib>
-#include <thread>
-#include <cstdio>
+#include <algorithm>
 #include <ctime>
-#include <csignal>
 
 #include <google/protobuf/timestamp.pb.h>
 #include <google/protobuf/duration.pb.h>
 
 #include <fstream>
 #include <iostream>
-#include <list>
+#include <thread>
 #include <memory>
 #include <string>
 #include <stdlib.h>
 #include <unistd.h>
-#include <unordered_map>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
 #include<glog/logging.h>
@@ -57,7 +54,6 @@
 #include "sns.grpc.pb.h"
 #include "coordinator.grpc.pb.h"
 #include "coordinator.pb.h"
-#include "client.h"
 
 
 using google::protobuf::Timestamp;
@@ -65,6 +61,7 @@ using google::protobuf::Duration;
 using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
+using grpc::ClientContext;
 using grpc::ServerReader;
 using grpc::ServerReaderWriter;
 using grpc::ServerWriter;
@@ -75,487 +72,281 @@ using csce438::Request;
 using csce438::Reply;
 using csce438::SNSService;
 using csce438::CoordService;
-
-using grpc::Channel;
-using grpc::ClientContext;
-using grpc::ClientReader;
-using grpc::ClientReaderWriter;
-using grpc::ClientWriter;
-using grpc::Status;
-
+using csce438::ServerInfo;
 
 struct Client {
-    std::string username;
-    bool connected = true;
-    int following_file_size = 0;
-    std::vector<Client*> client_followers;
-    std::vector<Client*> client_following;
-    ServerReaderWriter<Message, Message>* stream = 0;
-    // adding these two new variables below to monitor client heartbeats
-    std::time_t last_heartbeat;
-    bool missed_heartbeat = false;
-    bool operator==(const Client& c1) const{
-        return (username == c1.username);
-    }
+  std::string username;
+  bool connected = true;
+  int following_file_size = 0;
+  std::vector<Client*> client_followers;
+  std::vector<Client*> client_following;
+  ServerReaderWriter<Message, Message>* stream = 0;
+  bool operator==(const Client& c1) const{
+    return (username == c1.username);
+  }
 };
-
-void checkHeartbeat();
-std::time_t getTimeNow();
-
-std::unique_ptr<csce438::CoordService::Stub> coordinator_stub_;
-
-// coordinator rpcs
-IReply Heartbeat(std::string clusterId, std::string serverId, std::string hostname, std::string port);
-
 
 //Vector that stores every client that has been created
-/* std::vector<Client*> client_db; */
+std::vector<Client*> client_db;
 
-// using an unordered map to store clients rather than a vector as this allows for O(1) accessing and O(1) insertion
-std::unordered_map<std::string, Client*> client_db;
-
-// util function for checking if a client exists in the client_db and fetching it if it does
-Client* getClient(std::string username){
-    auto it = client_db.find(username);
-
-    if (it != client_db.end()) {
-        return client_db[username];
-    } else {
-        return NULL;
-    }
-
+//Helper function used to find a Client object given its username
+int find_user(std::string username){
+  int index = 0;
+  for(Client* c : client_db){
+    if(c->username == username)
+      return index;
+    index++;
+  }
+  return -1;
 }
 
-
 class SNSServiceImpl final : public SNSService::Service {
+  
+  Status List(ServerContext* context, const Request* request, ListReply* list_reply) override {
+    log(INFO,"Serving List Request from: " + request->username()  + "\n");
+     
+    Client* user = client_db[find_user(request->username())];
+ 
+    int index = 0;
+    for(Client* c : client_db){
+      list_reply->add_all_users(c->username);
+    }
+    std::vector<Client*>::const_iterator it;
+    for(it = user->client_followers.begin(); it!=user->client_followers.end(); it++){
+      list_reply->add_followers((*it)->username);
+    }
+    return Status::OK;
+  }
 
-    Status ClientHeartbeat(ServerContext* context, const Request* request, Reply* reply) override {
+  Status Follow(ServerContext* context, const Request* request, Reply* reply) override {
 
-        std::string username = request->username();
+    std::string username1 = request->username();
+    std::string username2 = request->arguments(0);
+    log(INFO,"Serving Follow Request from: " + username1 + " for: " + username2 + "\n");
 
-        /* std::cout << "got a heartbeat from client: " << username << std::endl; */
-        Client* c = getClient(username);
-        if (c != NULL){
-            c->last_heartbeat = getTimeNow();
-
-        } else {
-            std::cout << "client was not found, for some reason!\n";
-            return Status::CANCELLED;
-        }
-
+    int join_index = find_user(username2);
+    if(join_index < 0 || username1 == username2)
+      reply->set_msg("Join Failed -- Invalid Username");
+    else{
+      Client *user1 = client_db[find_user(username1)];
+      Client *user2 = client_db[join_index];      
+      if(std::find(user1->client_following.begin(), user1->client_following.end(), user2) != user1->client_following.end()){
+	reply->set_msg("Join Failed -- Already Following User");
         return Status::OK;
+      }
+      user1->client_following.push_back(user2);
+      user2->client_followers.push_back(user1);
+      reply->set_msg("Follow Successful");
     }
+    return Status::OK; 
+  }
 
-    Status List(ServerContext* context, const Request* request, ListReply* list_reply) override {
-
-        // add all known clients to the all_users vector
-        for (const auto& pair : client_db){
-            list_reply->add_all_users(pair.first);
-        }
-
-        std::string username = request->username();
-
-        // add all the followers of the client to the folowers vector
-        Client* c = getClient(username);
-        if (c != NULL){
-            for (Client* x : c->client_followers){
-                list_reply->add_followers(x->username);
-            }
-
-        } else {
-            return Status::CANCELLED;
-        }
-
+  Status UnFollow(ServerContext* context, const Request* request, Reply* reply) override {
+    std::string username1 = request->username();
+    std::string username2 = request->arguments(0);
+    log(INFO,"Serving Unfollow Request from: " + username1 + " for: " + username2);
+ 
+    int leave_index = find_user(username2);
+    if(leave_index < 0 || username1 == username2) {
+      reply->set_msg("Unknown follower");
+    } else{
+      Client *user1 = client_db[find_user(username1)];
+      Client *user2 = client_db[leave_index];
+      if(std::find(user1->client_following.begin(), user1->client_following.end(), user2) == user1->client_following.end()){
+	reply->set_msg("You are not a follower");
         return Status::OK;
+      }
+      
+      user1->client_following.erase(find(user1->client_following.begin(), user1->client_following.end(), user2)); 
+      user2->client_followers.erase(find(user2->client_followers.begin(), user2->client_followers.end(), user1));
+      reply->set_msg("UnFollow Successful");
     }
+    return Status::OK;
+  }
 
-    Status Follow(ServerContext* context, const Request* request, Reply* reply) override {
-
-        std::string u1 = request->username();
-        std::string u2 = request->arguments(0);
-        Client* c1 = getClient(u1);
-        Client* c2 = getClient(u2);
-
-        if (c1 == nullptr || c2 == nullptr) { // either of the clients dont exist
-            return Status(grpc::CANCELLED, "invalid username");
-        }
-
-        if (c1 == c2){ // if a client is asked to follow itself
-            return Status(grpc::CANCELLED, "same client");
-        }
-
-
-
-        // check if the client to follow is already being followed
-        bool isAlreadyFollowing = std::find(c1->client_following.begin(), c1->client_following.end(), c2) != c1->client_following.end();
-
-        if (isAlreadyFollowing) {
-            return Status(grpc::CANCELLED, "already following");
-        }
-
-        // add the clients to each other's relevant vector
-        c1->client_following.push_back(c2);
-        c2->client_followers.push_back(c1);
-
-        return Status::OK; 
+  // RPC Login
+  Status Login(ServerContext* context, const Request* request, Reply* reply) override {
+    Client* c = new Client();
+    std::string username = request->username();
+    log(INFO, "Serving Login Request: " + username + "\n");
+    
+    int user_index = find_user(username);
+    if(user_index < 0){
+      c->username = username;
+      client_db.push_back(c);
+      reply->set_msg("Login Successful!");
     }
-
-    Status UnFollow(ServerContext* context, const Request* request, Reply* reply) override {
-
-        std::string username = request->username();
-        // using a multimap to fetch the metadata out of the client's servercontext so we can check to see if a SIGINT was issued on the client's timeline
-        const std::multimap<grpc::string_ref, grpc::string_ref>& metadata = context->client_metadata();
-
-        auto it = metadata.find("terminated");
-        if (it != metadata.end()) {
-            std::string customValue(it->second.data(), it->second.length());
-
-            std::string termStatus = customValue; // checking the value of the key "terminated" from the metadata in servercontext
-            if (termStatus == "true"){
-
-                Client* c = getClient(username);
-                if (c != NULL){ // if the client exists, change its connection status and set its stream to null
-                    c->last_heartbeat = getTimeNow();
-                    c->connected = false;
-                    c->stream = nullptr;
-                }
-                // DO NOT CONTINUE WITH UNFOLLOW AFTER THIS
-                // Terminate here as this was not an actual unfollow request and just a makeshift way to handle SIGINTs on the client side
-                return Status::OK;
-            }
-
-        }
-
-
-        std::string u1 = request->username();
-        std::string u2 = request->arguments(0);
-        Client* c1 = getClient(u1);
-        Client* c2 = getClient(u2);
-
-
-        if (c1 == nullptr || c2 == nullptr) {
-            return Status(grpc::CANCELLED, "invalid username");
-        }
-
-        if (c1 == c2){
-            return Status(grpc::CANCELLED, "same client");
-        }
-
-
-        // Find and erase c2 from c1's following
-        auto it1 = std::find(c1->client_following.begin(), c1->client_following.end(), c2);
-        if (it1 != c1->client_following.end()) {
-            c1->client_following.erase(it1);
-        } else {
-            return Status(grpc::CANCELLED, "not following");
-        }
-
-        // if it gets here, it means it was following the other client
-        // Find and erase c1 from c2's followers
-        auto it2 = std::find(c2->client_followers.begin(), c2->client_followers.end(), c1);
-        if (it2 != c2->client_followers.end()) {
-            c2->client_followers.erase(it2);
-        }
-
-        return Status::OK;
+    else{
+      Client *user = client_db[user_index];
+      if(user->connected) {
+	log(WARNING, "User already logged on");
+        reply->set_msg("you have already joined");
+      }
+      else{
+        std::string msg = "Welcome Back " + user->username;
+	reply->set_msg(msg);
+        user->connected = true;
+      }
     }
+    return Status::OK;
+  }
 
-    // RPC Login
-    Status Login(ServerContext* context, const Request* request, Reply* reply) override {
-
-        std::string username = request->username();
-
-        Client* c = getClient(username);
-        // if c exists 
-        if (c != NULL){
-            //  if an instance of the user is already active
-            if (c->connected){
-                c->missed_heartbeat = false;
-                return Status::CANCELLED;
-            } else { // this means the user was previously active, but inactive until just now
-                c->connected = true;
-                c->last_heartbeat = getTimeNow();
-                c->missed_heartbeat = false;
-                return Status::OK;
-            }
-        } else {
-            // create a new client as this is a first time request from a new client
-            Client* newc = new Client();
-            newc->username = username;
-            newc->connected = true;
-            newc->last_heartbeat = getTimeNow();
-            newc->missed_heartbeat = false;
-            client_db[username] = newc;
+  Status Timeline(ServerContext* context, 
+		ServerReaderWriter<Message, Message>* stream) override {
+    log(INFO,"Serving Timeline Request");
+    Message message;
+    Client *c;
+    while(stream->Read(&message)) {
+      std::string username = message.username();
+      int user_index = find_user(username);
+      c = client_db[user_index];
+ 
+      //Write the current message to "username.txt"
+      std::string filename = username+".txt";
+      std::ofstream user_file(filename,std::ios::app|std::ios::out|std::ios::in);
+      google::protobuf::Timestamp temptime = message.timestamp();
+      std::string time = google::protobuf::util::TimeUtil::ToString(temptime);
+      std::string fileinput = time+" :: "+message.username()+":"+message.msg()+"\n";
+      //"Set Stream" is the default message from the client to initialize the stream
+      if(message.msg() != "Set Stream")
+        user_file << fileinput;
+      //If message = "Set Stream", print the first 20 chats from the people you follow
+      else{
+        if(c->stream==0)
+      	  c->stream = stream;
+        std::string line;
+        std::vector<std::string> newest_twenty;
+        std::ifstream in(username+"following.txt");
+        int count = 0;
+        //Read the last up-to-20 lines (newest 20 messages) from userfollowing.txt
+        while(getline(in, line)){
+//          count++;
+//          if(c->following_file_size > 20){
+//	    if(count < c->following_file_size-20){
+//	      continue;
+//            }
+//          }
+          newest_twenty.push_back(line);
         }
-
-        return Status::OK;
+        Message new_msg; 
+ 	//Send the newest messages to the client to be displayed
+ 	if(newest_twenty.size() >= 40){ 	
+	    for(int i = newest_twenty.size()-40; i<newest_twenty.size(); i+=2){
+	       new_msg.set_msg(newest_twenty[i]);
+	       stream->Write(new_msg);
+	    }
+        }else{
+	    for(int i = 0; i<newest_twenty.size(); i+=2){
+	       new_msg.set_msg(newest_twenty[i]);
+	       stream->Write(new_msg);
+	    }
+        }
+        //std::cout << "newest_twenty.size() " << newest_twenty.size() << std::endl; 
+        continue;
+      }
+      //Send the message to each follower's stream
+      std::vector<Client*>::const_iterator it;
+      for(it = c->client_followers.begin(); it!=c->client_followers.end(); it++){
+        Client *temp_client = *it;
+      	if(temp_client->stream!=0 && temp_client->connected)
+	  temp_client->stream->Write(message);
+        //For each of the current user's followers, put the message in their following.txt file
+        std::string temp_username = temp_client->username;
+        std::string temp_file = temp_username + "following.txt";
+	std::ofstream following_file(temp_file,std::ios::app|std::ios::out|std::ios::in);
+	following_file << fileinput;
+        temp_client->following_file_size++;
+	std::ofstream user_file(temp_username + ".txt",std::ios::app|std::ios::out|std::ios::in);
+        user_file << fileinput;
+      }
     }
-
-    const int MAX_MESSAGES = 20;
-
-    Status Timeline(ServerContext* context, ServerReaderWriter<Message, Message>* stream) override {
-
-        // Initialize variables important for persisting timelines on the disk
-        Message m;
-        Client* c;
-        std::string u;
-        std::vector<std::string> latestMessages;
-        std::vector<std::string> allMessages;
-        bool firstTimelineStream = true;
-
-
-        // multimap to fetch metadata from the servercontext which contains the username of the current client
-        // this helps to Initialize the stream for this client as this is first contact
-        const std::multimap<grpc::string_ref, grpc::string_ref>& metadata = context->client_metadata();
-
-        auto it = metadata.find("username");
-        if (it != metadata.end()) {
-            std::string customValue(it->second.data(), it->second.length());
-
-            // customValue is the username from the metadata received from the client
-            u = customValue;
-            c = getClient(u);
-            c->stream = stream; // set the client's stream to be the current stream
-        }
-
-        // if this is the first time the client is logging back 
-        if (firstTimelineStream && c != nullptr) {
-            // Read latest 20 messages from following file
-            std::ifstream followingFile(u + "_following.txt");
-            if (followingFile.is_open()) {
-                std::string line;
-                while (std::getline(followingFile, line)) {
-                    allMessages.push_back(line);
-                }
-
-                // Determine the starting index for retrieving latest messages
-                int startIndex = std::max(0, static_cast<int>(allMessages.size()) - MAX_MESSAGES);
-
-                // Retrieve the latest messages
-                for (int i = startIndex; i < allMessages.size(); ++i) {
-                    latestMessages.push_back(allMessages[i]);
-                }
-                std::reverse(latestMessages.begin(), latestMessages.end()); // reversing the vector to match the assignment description
-                followingFile.close();
-            }
-
-            // Send latest 20 messages to client via the grpc stream
-            for (const std::string& msg : latestMessages) {
-                Message latestMessage;
-                latestMessage.set_msg(msg + "\n");
-                stream->Write(latestMessage);
-            }
-            firstTimelineStream = false;
-        }
-
-
-        while (stream->Read(&m)) { // while there are messages being sent by the client over the stream
-
-            if (c != nullptr) {
-
-                // Convert timestamp to string
-                std::time_t timestamp_seconds = m.timestamp().seconds();
-                std::tm* timestamp_tm = std::gmtime(&timestamp_seconds);
-
-                char time_str[50]; // Make sure the buffer is large enough
-                std::strftime(time_str, sizeof(time_str), "%a %b %d %T %Y", timestamp_tm);
-
-                std::string ffo = u + '(' + time_str + ')' + " >> " + m.msg();
-
-                // Append to user's timeline file
-                std::ofstream userFile(u + ".txt", std::ios_base::app);
-                if (userFile.is_open()) {
-                    userFile.seekp(0, std::ios_base::beg);
-                    userFile << ffo;
-                    userFile.close();
-                }
-
-
-                // Send the new message to all followers for their timeline
-                for (Client* follower : c->client_followers) {
-                    if (follower->stream != nullptr) {
-                        Message followerMessage;
-                        followerMessage.set_msg(ffo);
-
-                        if (follower->stream != nullptr) {
-                            follower->stream->Write(followerMessage);
-                        } 
-
-                    } 
-                }
-
-                // Append to  all the followers' following file
-                for (Client* follower : c->client_followers) {
-                    std::ofstream followerFile(follower->username + "_following.txt", std::ios_base::app);
-                    if (followerFile.is_open()) {
-                        followerFile.seekp(0, std::ios_base::beg);
-                        followerFile << ffo;
-                        followerFile.close();
-                    }
-                }
-            } 
-
-        }
-
-        return Status::OK;
-    }
+    //If the client disconnected from Chat Mode, set connected to false
+    c->connected = false;
+    return Status::OK;
+  }
 
 };
 
-// function that sends a heartbeat to the coordinator
-IReply Heartbeat(std::string clusterId, std::string serverId, std::string hostname, std::string port, bool isHeartbeat) {
+void RunServer(std::string port_no) {
+  std::string server_address = "0.0.0.0:"+port_no;
+  SNSServiceImpl service;
 
-    IReply ire;
+  ServerBuilder builder;
+  builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
+  builder.RegisterService(&service);
+  std::unique_ptr<Server> server(builder.BuildAndStart());
+  std::cout << "Server listening on " << server_address << std::endl;
+  log(INFO, "Server listening on "+server_address);
 
-    // creating arguments and utils to make the gRPC
-    ClientContext context;
-    csce438::ServerInfo serverinfo;
+  server->Wait();
+}
+
+void Heartbeat(std::string coordinatorIp, std::string coordinatorPort, ServerInfo serverInfo) {
+  std::string coordinatorInfo = coordinatorIp + ":" + coordinatorPort; 
+  std::unique_ptr<CoordService::Stub> stub = std::unique_ptr<CoordService::Stub>(CoordService::NewStub(grpc::CreateChannel(coordinatorInfo, grpc::InsecureChannelCredentials())));
+
+  // Call Heartbeat RPC every five seconds
+  while (true) {
+    sleep(5);
+    ClientContext clientContext;
     csce438::Confirmation confirmation;
-
-
-    if (isHeartbeat){
-        context.AddMetadata("heartbeat", "Hello"); // adding the server's clusterId in the metadata so the coordinator can know
+    stub->Heartbeat(&clientContext, serverInfo, &confirmation);
+    if (!confirmation.status()) {
+      log(ERROR, "Failed to send heartbeat to coordinator.");
     }
-
-    context.AddMetadata("clusterid", clusterId); // adding the server's clusterId in the metadata so the coordinator can know
-
-    int intServerId = std::stoi(serverId);
-
-    serverinfo.set_serverid(intServerId);
-    serverinfo.set_hostname(hostname);
-    serverinfo.set_port(port);
-
-    grpc::Status status = coordinator_stub_->Heartbeat(&context, serverinfo, &confirmation);
-    if (status.ok()){
-        ire.grpc_status = status;
-    }else { // professor said in class that since the servers cannot be run without a coordinator, you should exit
-
-        ire.grpc_status = status;
-        std::cout << "coordinator not found! exiting now...\n";
-    }
-
-    return ire;
-}
-
-// function that runs inside a detached thread that calls the heartbeat function
-void sendHeartbeat(std::string clusterId, std::string serverId, std::string hostname, std::string port) {
-    while (true){
-
-        sleep(3);
-
-        IReply reply = Heartbeat(clusterId, serverId, "localhost", port, true);
-        if (!reply.grpc_status.ok()){
-            exit(1);
-        }
-    }
-
-}
-
-void RunServer(std::string clusterId, std::string serverId, std::string coordinatorIP, std::string coordinatorPort, std::string port_no) {
-    std::string server_address = "0.0.0.0:"+port_no;
-    SNSServiceImpl service;
-
-    // running the heartbeat function to monitor heartbeats from the clients
-    std::thread hb(checkHeartbeat);
-
-    ServerBuilder builder;
-    builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
-    builder.RegisterService(&service);
-    std::unique_ptr<Server> server(builder.BuildAndStart());
-    std::cout << "Server listening on " << server_address << std::endl;
-    log(INFO, "Server listening on "+server_address);
-
-
-    // FROM WHAT I UNDERSTAND, THIS IS THE BEST PLACE TO REGISTER WITH THE COORDINATOR
-
-    // need to first create a stub to communicate with the coordinator to get the info of the server to connect to
-    std::string coordinator_address = coordinatorIP + ":" + coordinatorPort;
-    grpc::ChannelArguments channel_args;
-    std::shared_ptr<grpc::Channel> channel = grpc::CreateCustomChannel(
-            coordinator_address, grpc::InsecureChannelCredentials(), channel_args);
-
-    // Instantiate the coordinator stub
-    coordinator_stub_ = csce438::CoordService::NewStub(channel);
-    IReply reply = Heartbeat(clusterId, serverId, "localhost", port_no, false);
-    if (!reply.grpc_status.ok()){
-        // EXITING AS COORDINATOR WAS NOT REACHABLE
-        exit(0);
-    }
-
-    // running a thread to periodically send a heartbeat to the coordinator
-    std::thread myhb(sendHeartbeat, clusterId, serverId, "localhost", port_no);
-
-    myhb.detach();
-
-
-    server->Wait();
-}
-
-
-void checkHeartbeat(){
-    while(true){
-        //check clients for heartbeat > 3s
-
-        for (const auto& pair : client_db){
-            if(difftime(getTimeNow(),pair.second->last_heartbeat) > 3){
-                std::cout << "missed heartbeat from client with id " << pair.first << std::endl;
-                if(!pair.second->missed_heartbeat){
-                    Client* current = getClient(pair.first);
-                    if (current != NULL){
-                        std::cout << "setting the client's values in the DB to show that it is down!\n";
-                        current->connected = false;
-                        current->stream = nullptr;
-                        current->missed_heartbeat = true;
-                        current->last_heartbeat = getTimeNow();
-                    } else{
-                        std::cout << "SUDDENLY, THE CLIENT CANNOT BE FOUND?!\n";
-                    }
-                }
-            }
-        }
-
-        sleep(3);
-    }
+  }
 }
 
 int main(int argc, char** argv) {
 
-    std::string clusterId = "1";
-    std::string serverId = "1";
-    std::string coordinatorIP = "localhost";
-    std::string coordinatorPort = "9090";
-    std::string port = "1000";
-
-    int opt = 0;
-    while ((opt = getopt(argc, argv, "c:s:h:k:p:")) != -1){
-        switch(opt) {
-            case 'c':
-                clusterId = optarg;break;
-            case 's':
-                serverId = optarg;break;
-            case 'h':
-                coordinatorIP = optarg;break;
-            case 'k':
-                coordinatorPort = optarg;break;
-            case 'p':
-                port = optarg;break;
-            default:
-                std::cout << "Invalid Command Line Argument\n";
-        }
+  std::string clusterId = "1";
+  std::string serverId = "1";
+  std::string coordinatorIp = "localhost";
+  std::string coordinatorPort = "9090";
+  std::string port = "3010";
+  
+  int opt = 0;
+  while ((opt = getopt(argc, argv, "c:s:h:k:p:")) != -1){
+    switch(opt) {
+      case 'c':
+        clusterId = optarg;break;
+      case 's':
+        serverId = optarg;break;
+      case 'h':
+        coordinatorIp = optarg;break;
+      case 'k':
+        coordinatorPort = optarg;break;
+      case 'p':
+          port = optarg;break;
+      default:
+	  std::cerr << "Invalid Command Line Argument\n";
     }
+  }
+  
+  std::string log_file_name = std::string("server-") + port;
+  google::InitGoogleLogging(log_file_name.c_str());
+  log(INFO, "Logging Initialized. Server starting...");
 
+  ServerInfo serverInfo;
+  serverInfo.set_hostname("localhost");
+  serverInfo.set_port(port);
+  serverInfo.set_type("server");
+  serverInfo.set_serverid(atoi(serverId.c_str()));
+  serverInfo.set_clusterid(atoi(clusterId.c_str()));
+  std::thread sendHeartbeat(Heartbeat, coordinatorIp, coordinatorPort, serverInfo);
 
-    std::string log_file_name = std::string("server-") + port;
-    google::InitGoogleLogging(log_file_name.c_str());
-    log(INFO, "Logging Initialized. Server starting...");
+  // Create server's directory for timeline storage if it doesn't already exist
+  std::string serverDirectory = "server_" + clusterId + "_" + serverId;
+  struct stat statBuf;
+  if (stat(serverDirectory.c_str(), &statBuf) != 0) {
+    mkdir(serverDirectory.c_str(), 0755);
+  }
+  // Change directories so that timeline files will be placed in the server's directory
+  int res = chdir(serverDirectory.c_str());
+  std::cout << res << std::endl;
+  RunServer(port);
+  sendHeartbeat.join();
 
-    /* RunServer(port); */
-    // changing this call so i can pass other auxilliary variables to be able to communicate with the server
-    RunServer(clusterId, serverId, coordinatorIP, coordinatorPort, port);
-
-    return 0;
+  return 0;
 }
-
-std::time_t getTimeNow(){
-    return std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-}
+//-- vim: ts=2 sts=2 sw=2 et

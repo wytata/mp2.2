@@ -3,7 +3,7 @@
 
 PROTOBUF_UTF8_RANGE_LINK_LIBS = -lutf8_validity
 
-export PKG_CONFIG_PATH = /home/csce662/.local/lib/pkgconfig:/home/csce662/grpc/third_party/re2:/home/csce662/.local/share/pkgconfig/
+export PKG_CONFIG_PATH = /home/csce438/.local/lib/pkgconfig:/home/csce438/grpc/third_party/re2:/home/csce438/.local/share/pkgconfig/
 
 
 HOST_SYSTEM = $(shell uname | cut -f 1 -d_)

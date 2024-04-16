@@ -16,10 +16,14 @@
 #include <thread>
 #include <mutex>
 #include <stdlib.h>
+#include <stdio.h>
+#include <cstdlib>
 #include <unistd.h>
 #include <algorithm>
 #include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
+#include<glog/logging.h>
+#define log(severity, msg) LOG(severity) << msg; google::FlushLogFiles(google::severity); 
 
 #include "sns.grpc.pb.h"
 #include "sns.pb.h"
@@ -54,6 +58,7 @@ std::vector<std::string> get_lines_from_file(std::string);
 void run_synchronizer(std::string,std::string,std::string,int);
 std::vector<std::string> get_all_users_func(int);
 std::vector<std::string> get_tl_or_fl(int, int, bool);
+void Heartbeat(std::string coordinatorIp, std::string coordinatorPort, ServerInfo serverInfo, int syncID);
 
 std::unique_ptr<csce438::CoordService::Stub> coordinator_stub_;
 
@@ -157,7 +162,17 @@ int main(int argc, char** argv) {
         }
     }
 
+    std::cout << "cluster id " << std::to_string(((synchID-1) % 3) + 1) << std::endl;
+    ServerInfo serverInfo;
+    serverInfo.set_hostname("localhost");
+    serverInfo.set_port(port);
+    serverInfo.set_type("synchronizer");
+    serverInfo.set_serverid(synchID);
+    serverInfo.set_clusterid(((synchID-1) % 3) + 1);
+    std::thread sendHeartbeat(Heartbeat, coordIP, coordPort, serverInfo, synchID);
+
     RunServer(coordIP, coordPort, port, synchID);
+    sendHeartbeat.join();
     return 0;
 }
 
@@ -203,7 +218,7 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
 
 	    //force update managed users from newly synced users
             //for all users
-            for(auto i : aggregated_users){
+//            for(auto i : aggregated_users){
                 //get currently managed users
                 //if user IS managed by current synch
                     //read their follower lists
@@ -213,9 +228,9 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
                     //add post to tl of managed user    
             
                      // YOUR CODE HERE
-                    }
-                }
-            }
+                    //}
+                //}
+//            }
     }
     return;
 }
@@ -246,6 +261,31 @@ std::vector<std::string> get_lines_from_file(std::string filename){
   }*/ 
 
   return users;
+}
+
+void Heartbeat(std::string coordinatorIp, std::string coordinatorPort, ServerInfo serverInfo, int syncID) {
+  std::string coordinatorInfo = coordinatorIp + ":" + coordinatorPort; 
+  std::unique_ptr<CoordService::Stub> stub = std::unique_ptr<CoordService::Stub>(CoordService::NewStub(grpc::CreateChannel(coordinatorInfo, grpc::InsecureChannelCredentials())));
+
+  ClientContext clientContext;
+  csce438::Confirmation confirmation;
+  stub->Heartbeat(&clientContext, serverInfo, &confirmation);
+  if (!confirmation.status()) {
+    log(ERROR, "Failed to send heartbeat to coordinator.");
+  }
+  ID id;
+  id.set_id(syncID);
+  // Call Heartbeat RPC every five seconds
+  while (true) {
+    ClientContext newContext;
+    ServerList serverList;
+    stub->GetAllFollowerServers(&newContext, id, &serverList);
+    std::cout << "hello world" << std::endl;
+    for (auto& name : serverList.serverid()) {
+        std::cout << std::to_string(name) << std::endl;         
+    }
+    sleep(5);
+  }
 }
 
 bool file_contains_user(std::string filename, std::string user){
