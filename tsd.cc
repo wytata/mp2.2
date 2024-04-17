@@ -125,8 +125,14 @@ class SNSServiceImpl final : public SNSService::Service {
     log(INFO,"Serving Follow Request from: " + username1 + " for: " + username2 + "\n");
 
     int join_index = find_user(username2);
-    if(join_index < 0 || username1 == username2)
-      reply->set_msg("Join Failed -- Invalid Username");
+    if(join_index < 0 || username1 == username2) {
+      std::string filename = "following_" + username1 + ".txt";
+      std::ofstream user_file(filename,std::ios::app|std::ios::out|std::ios::in);
+      user_file << username2 << std::endl;
+      user_file << "hello world" << std::endl;
+    } // user on another cluster - write this to a file
+      //reply->set_msg("Join Failed -- Invalid Username");
+
     else{
       Client *user1 = client_db[find_user(username1)];
       Client *user2 = client_db[join_index];      
@@ -174,7 +180,11 @@ class SNSServiceImpl final : public SNSService::Service {
     if(user_index < 0){
       c->username = username;
       client_db.push_back(c);
-      reply->set_msg("Login Successful!");
+      reply->set_msg("Login Successful!"); 
+      // Now update list of users in all_users.txt
+      std::string filename = "all_users.txt";
+      std::ofstream users_file(filename,std::ios::app|std::ios::out|std::ios::in);
+      users_file << username << std::endl;
     }
     else{
       Client *user = client_db[user_index];
@@ -202,7 +212,7 @@ class SNSServiceImpl final : public SNSService::Service {
       c = client_db[user_index];
  
       //Write the current message to "username.txt"
-      std::string filename = username+".txt";
+      std::string filename = "timeline_" + username +".txt";
       std::ofstream user_file(filename,std::ios::app|std::ios::out|std::ios::in);
       google::protobuf::Timestamp temptime = message.timestamp();
       std::string time = google::protobuf::util::TimeUtil::ToString(temptime);
@@ -336,14 +346,21 @@ int main(int argc, char** argv) {
   std::thread sendHeartbeat(Heartbeat, coordinatorIp, coordinatorPort, serverInfo);
 
   // Create server's directory for timeline storage if it doesn't already exist
-  std::string serverDirectory = "server_" + clusterId + "_" + serverId;
+  std::string serverDirectory = "cluster_" + clusterId;
   struct stat statBuf;
   if (stat(serverDirectory.c_str(), &statBuf) != 0) {
     mkdir(serverDirectory.c_str(), 0755);
   }
   // Change directories so that timeline files will be placed in the server's directory
-  int res = chdir(serverDirectory.c_str());
-  std::cout << res << std::endl;
+  chdir(serverDirectory.c_str());
+
+  serverDirectory = serverId;
+  if (stat(serverDirectory.c_str(), &statBuf) != 0) {
+    mkdir(serverDirectory.c_str(), 0755);
+  }
+
+  chdir(serverDirectory.c_str());
+
   RunServer(port);
   sendHeartbeat.join();
 

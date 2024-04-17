@@ -162,17 +162,17 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::cout << "cluster id " << std::to_string(((synchID-1) % 3) + 1) << std::endl;
+    //std::cout << "cluster id " << std::to_string(((synchID-1) % 3) + 1) << std::endl;
     ServerInfo serverInfo;
     serverInfo.set_hostname("localhost");
     serverInfo.set_port(port);
     serverInfo.set_type("synchronizer");
     serverInfo.set_serverid(synchID);
     serverInfo.set_clusterid(((synchID-1) % 3) + 1);
-    std::thread sendHeartbeat(Heartbeat, coordIP, coordPort, serverInfo, synchID);
+    //std::thread sendHeartbeat(Heartbeat, coordIP, coordPort, serverInfo, synchID);
+    Heartbeat(coordIP, coordPort, serverInfo, synchID);
 
     RunServer(coordIP, coordPort, port, synchID);
-    sendHeartbeat.join();
     return 0;
 }
 
@@ -186,7 +186,6 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
 
     ServerInfo msg;
     Confirmation c;
-    grpc::ClientContext context;
 
     msg.set_serverid(synchID);
     msg.set_hostname("127.0.0.1");
@@ -195,10 +194,25 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
 
     //send init heartbeat
 
+    std::unique_ptr<SynchService::Stub> synch_stub_;
     //TODO: begin synchronization process
     while(true){
         //change this to 30 eventually
-        sleep(20);
+        sleep(5);
+        grpc::ClientContext context;
+        ServerList followerServers;
+        ID id;
+        id.set_id(synchID);
+        coord_stub_->GetAllFollowerServers(&context, id, &followerServers);
+        std::vector<std::string> hosts, ports;
+        for (std::string host : followerServers.hostname()) {
+            std::cout << host << std::endl;
+            hosts.push_back(host);
+        }
+        for (std::string port : followerServers.port()) {
+            std::cout << port << std::endl;
+            ports.push_back(port);
+        }
         //synch all users file 
             //get list of all followers
 
@@ -273,19 +287,16 @@ void Heartbeat(std::string coordinatorIp, std::string coordinatorPort, ServerInf
   if (!confirmation.status()) {
     log(ERROR, "Failed to send heartbeat to coordinator.");
   }
-  ID id;
-  id.set_id(syncID);
   // Call Heartbeat RPC every five seconds
-  while (true) {
+  /*while (true) {
     ClientContext newContext;
     ServerList serverList;
     stub->GetAllFollowerServers(&newContext, id, &serverList);
-    std::cout << "hello world" << std::endl;
     for (auto& name : serverList.serverid()) {
         std::cout << std::to_string(name) << std::endl;         
     }
     sleep(5);
-  }
+  }*/
 }
 
 bool file_contains_user(std::string filename, std::string user){
@@ -305,8 +316,11 @@ bool file_contains_user(std::string filename, std::string user){
 
 std::vector<std::string> get_all_users_func(int synchID){
     //read all_users file master and client for correct serverID
-    std::string master_users_file = "./master"+std::to_string(synchID)+"/all_users";
-    std::string slave_users_file = "./slave"+std::to_string(synchID)+"/all_users";
+    //std::string master_users_file = "./master"+std::to_string(synchID)+"/all_users";
+    //std::string slave_users_file = "./slave"+std::to_string(synchID)+"/all_users";
+    std::string clusterID = std::to_string(((synchID-1) % 3) + 1);
+    std::string master_users_file = "./cluster_" + clusterID + "/1/all_users.txt";
+    std::string slave_users_file = "./cluster_" + clusterID + "/2/all_users.txt";
     //take longest list and package into AllUsers message
     std::vector<std::string> master_user_list = get_lines_from_file(master_users_file);
     std::vector<std::string> slave_user_list = get_lines_from_file(slave_users_file);

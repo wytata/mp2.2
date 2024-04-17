@@ -102,7 +102,7 @@ class CoordServiceImpl final : public CoordService::Service {
           s_mutex.lock();
           serverIndex = findServer(synchronizers.at(clusterID-1), serverID);
           if (serverIndex == -1) { // synchronizer doesn't yet exist in coordinator database.
-            std::cout << "adding new synchronizer server to database" << std::endl;
+            //std::cout << "adding new synchronizer server in cluster " << clusterID << " to database" << std::endl;
             zNode* toAdd = new zNode();
             toAdd->serverID = serverinfo->serverid();
             toAdd->port = serverinfo->port();
@@ -175,13 +175,14 @@ class CoordServiceImpl final : public CoordService::Service {
 
     Status GetAllFollowerServers(ServerContext* context, const ID* id, ServerList* serverList) override {
       int clusterID = id->id();
-      std::cout << "request from syncrhonizer " << std::to_string(clusterID) << std::endl;
+      //std::cout << "request from syncrhonizer " << std::to_string(clusterID) << std::endl;
 
+      s_mutex.lock();
       for (int i = 0; i < synchronizers.size(); i++) {
-        std::cout << "got into loop\n";
+        //std::cout << "got into loop\n";
         if (i != clusterID - 1) { // Synchronizer calling RPC does not need synchronizer info from its own cluster
           for (auto& synchronizer : synchronizers.at(i)) {
-            std::cout << "got into inner loop\n";
+            //std::cout << "got into inner loop\n";
             serverList->add_port(synchronizer->port);
             serverList->add_type(synchronizer->type);
             serverList->add_serverid(synchronizer->serverID);
@@ -189,8 +190,18 @@ class CoordServiceImpl final : public CoordService::Service {
           }
         }
       }
+      s_mutex.unlock();
+
       return Status::OK;
     }
+
+    /*Status GetFollowerServer(ServerContext* context, const ID* id, ServerList* serverList) override {
+      int clientID = id->id();
+      int clientCluster = ((clientID - 1) % 3) + 1;
+      for (int i = 0; i < synchronizers.at(clientCluster).size(); i++) { // obtain first active server
+        
+      }
+    }*/
 };
 
 void RunServer(std::string port_no){
