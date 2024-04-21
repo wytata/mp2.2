@@ -34,16 +34,21 @@
 #include <algorithm>
 #include <ctime>
 
+#include <exception>
+#include <functional>
 #include <google/protobuf/timestamp.pb.h>
 #include <google/protobuf/duration.pb.h>
 
 #include <fstream>
 #include <iostream>
+#include <filesystem>
 #include <thread>
+#include <semaphore.h>
 #include <memory>
 #include <string>
 #include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <google/protobuf/util/time_util.h>
@@ -67,7 +72,9 @@ using grpc::ServerReaderWriter;
 using grpc::ServerWriter;
 using grpc::Status;
 using csce438::Message;
+using csce438::ID;
 using csce438::ListReply;
+using csce438::SynchronizerListReply;
 using csce438::Request;
 using csce438::Reply;
 using csce438::SNSService;
@@ -88,6 +95,8 @@ struct Client {
 
 //Vector that stores every client that has been created
 std::vector<Client*> client_db;
+//Cluster ID
+std::string clusterId, serverId;
 
 //Helper function used to find a Client object given its username
 int find_user(std::string username){
@@ -100,22 +109,118 @@ int find_user(std::string username){
   return -1;
 }
 
+std::vector<std::string> get_lines_from_file(std::string filename){
+  std::vector<std::string> users;
+  std::string user;
+  std::ifstream file; 
+  file.open(filename);
+  if(file.peek() == std::ifstream::traits_type::eof()){
+    //return empty vector if empty file
+    //std::cout<<"returned empty vector bc empty file"<<std::endl;
+    file.close();
+    return users;
+  }
+  while(file){
+    getline(file,user);
+
+    if(!user.empty())
+      users.push_back(user);
+  } 
+
+  file.close();
+
+
+  return users;
+}
+
+bool file_contains_user(std::string filename, std::string user){
+    std::vector<std::string> users;
+    //check username is valid
+    users = get_lines_from_file(filename);
+    for(int i = 0; i<users.size(); i++){
+      //std::cout<<"Checking if "<<user<<" = "<<users[i]<<std::endl;
+      if(user == users[i]){
+        //std::cout<<"found"<<std::endl;
+        return true;
+      }
+    }
+    //std::cout<<"not found"<<std::endl;
+    return false;
+}
+
 class SNSServiceImpl final : public SNSService::Service {
   
   Status List(ServerContext* context, const Request* request, ListReply* list_reply) override {
     log(INFO,"Serving List Request from: " + request->username()  + "\n");
-     
-    Client* user = client_db[find_user(request->username())];
- 
-    int index = 0;
-    for(Client* c : client_db){
-      list_reply->add_all_users(c->username);
+
+    std::string allUsersFile = "all_users.txt";
+    std::string user;
+    std::ifstream file; 
+
+    file.open(allUsersFile);
+    if(file.peek() == std::ifstream::traits_type::eof()){
+      file.close();
     }
+
+    while(file){
+      getline(file,user);
+      if(!user.empty()) {
+        list_reply->add_all_users(user);
+      }
+    } 
+    file.close();
+     
+    std::string followersFile = request->username() + "_followers.txt";
+    std::string follower;
+    std::ifstream followerStream; 
+
+    followerStream.open(followersFile);
+    if(followerStream.peek() == std::ifstream::traits_type::eof()){
+      followerStream.close();
+    }
+
+    while(followerStream){
+      getline(followerStream,user);
+      if(!user.empty()) {
+        list_reply->add_followers(user);
+      }
+    } 
+    followerStream.close();
+
+    // Now incorporate the orginial logic to get clients from this cluster
+    Client* client = client_db[find_user(request->username())];
+ 
     std::vector<Client*>::const_iterator it;
-    for(it = user->client_followers.begin(); it!=user->client_followers.end(); it++){
+    for(it = client->client_followers.begin(); it!=client->client_followers.end(); it++){
       list_reply->add_followers((*it)->username);
     }
+
     return Status::OK;
+    // Now we have all the users, followers from this cluster, but we need to talk to other clusters as well,
+    // hence, we call SynchronizerList to our cluster's synchronizer to get the rest of the data for us 
+
+
+
+    /*std::string clientID = request->username();
+    std::string followersFile = clientID + "_followers.txt"; 
+    std::vector<std::string> users;
+    std::string userString;
+    std::ifstream file; 
+    file.open(filename);
+    if(file.peek() == std::ifstream::traits_type::eof()){
+      //return empty vector if empty file
+      //std::cout<<"returned empty vector bc empty file"<<std::endl;
+      file.close();
+    } else {
+      while(file){
+        getline(file,userString);
+
+        if(!user.empty())
+          users.push_back(userString);
+      } 
+    }
+
+    file.close();*/
   }
 
   Status Follow(ServerContext* context, const Request* request, Reply* reply) override {
@@ -124,25 +229,39 @@ class SNSServiceImpl final : public SNSService::Service {
     std::string username2 = request->arguments(0);
     log(INFO,"Serving Follow Request from: " + username1 + " for: " + username2 + "\n");
 
+    if (username1 == username2) { // Don't allow this
+      reply->set_msg("invalid username");
+      return Status::OK;
+    }
+
     int join_index = find_user(username2);
-    if(join_index < 0 || username1 == username2) {
-      std::string filename = "following_" + username1 + ".txt";
+    if(join_index < 0) { // User on different cluster
+      // First check all_users file for user
+
+      if (!file_contains_user("all_users.txt", username2)) {
+        reply->set_msg("invalid username");
+        return Status::OK;
+      }
+
+      std::string filename = username1 + "_follow_list.txt";
       std::ofstream user_file(filename,std::ios::app|std::ios::out|std::ios::in);
       user_file << username2 << std::endl;
-      user_file << "hello world" << std::endl;
-    } // user on another cluster - write this to a file
-      //reply->set_msg("Join Failed -- Invalid Username");
+    } 
 
     else{
       Client *user1 = client_db[find_user(username1)];
       Client *user2 = client_db[join_index];      
       if(std::find(user1->client_following.begin(), user1->client_following.end(), user2) != user1->client_following.end()){
-	reply->set_msg("Join Failed -- Already Following User");
+	      reply->set_msg("Join Failed -- Already Following User");
         return Status::OK;
       }
       user1->client_following.push_back(user2);
       user2->client_followers.push_back(user1);
       reply->set_msg("Follow Successful");
+
+      /*std::string filename = username1 + "_following.txt";
+      std::ofstream user_file(filename,std::ios::app|std::ios::out|std::ios::in);
+      user_file << username2 << std::endl;*/
     }
     return Status::OK; 
   }
@@ -175,6 +294,7 @@ class SNSServiceImpl final : public SNSService::Service {
     Client* c = new Client();
     std::string username = request->username();
     log(INFO, "Serving Login Request: " + username + "\n");
+    std::cout << "Server cluster ID: " << clusterId << std::endl;
     
     int user_index = find_user(username);
     if(user_index < 0){
@@ -183,8 +303,11 @@ class SNSServiceImpl final : public SNSService::Service {
       reply->set_msg("Login Successful!"); 
       // Now update list of users in all_users.txt
       std::string filename = "all_users.txt";
+      std::string semName = "/" + clusterId + "_" + serverId + "_all_users";
+      sem_t* userSem = sem_open(semName.c_str(), O_CREAT);
       std::ofstream users_file(filename,std::ios::app|std::ios::out|std::ios::in);
       users_file << username << std::endl;
+      sem_close(userSem);
     }
     else{
       Client *user = client_db[user_index];
@@ -200,9 +323,148 @@ class SNSServiceImpl final : public SNSService::Service {
     }
     return Status::OK;
   }
+    
+  const int MAX_MESSAGES = 20;
 
   Status Timeline(ServerContext* context, 
-		ServerReaderWriter<Message, Message>* stream) override {
+		ServerReaderWriter<Message, Message>* stream) override { 
+
+      // Initialize variables important for persisting timelines on the disk
+      Message m;
+      Client* c;
+      std::string u;
+      std::vector<std::string> latestMessages;
+      std::vector<std::string> allMessages;
+      bool firstTimelineStream = true;
+
+
+      // multimap to fetch metadata from the servercontext which contains the username of the current client
+      // this helps to Initialize the stream for this client as this is first contact
+      const std::multimap<grpc::string_ref, grpc::string_ref>& metadata = context->client_metadata();
+
+      auto it = metadata.find("username");
+      if (it != metadata.end()) {
+          std::string customValue(it->second.data(), it->second.length());
+
+          // customValue is the username from the metadata received from the client
+          u = customValue;
+          //c = getClient(u);
+          c = client_db.at(find_user(u));
+          c->stream = stream; // set the client's stream to be the current stream
+      }
+
+      // if this is the first time the client is logging back 
+      if (firstTimelineStream && c != nullptr) {
+          // Read latest 20 messages from following file
+          std::ifstream followingFile(u + "_following.txt");
+          if (followingFile.is_open()) {
+              std::string line;
+              while (std::getline(followingFile, line)) {
+                  allMessages.push_back(line);
+              }
+
+              // Determine the starting index for retrieving latest messages
+              int startIndex = std::max(0, static_cast<int>(allMessages.size()) - MAX_MESSAGES);
+
+              // Retrieve the latest messages
+              for (int i = startIndex; i < allMessages.size(); ++i) {
+                  latestMessages.push_back(allMessages[i]);
+              }
+              std::reverse(latestMessages.begin(), latestMessages.end()); // reversing the vector to match the assignment description
+              followingFile.close();
+          }
+
+          // Send latest 20 messages to client via the grpc stream
+          for (const std::string& msg : latestMessages) {
+              Message latestMessage;
+              latestMessage.set_msg(msg + "\n");
+              stream->Write(latestMessage);
+          }
+          firstTimelineStream = false;
+      }
+
+      bool inTimeline = true;
+
+      std::thread timelineThread([&]() {
+        int previousLength; // Store previous length of user's timeline file. If it increased, then we know we have data to write to their stream
+        std::string userFeed = u + "_following.txt";
+        previousLength = get_lines_from_file(userFeed).size();
+        while (inTimeline) {
+          sleep(5);
+          // Check timeline file for updates, write to stream accordingly
+          std::vector<std::string> posts = get_lines_from_file(userFeed);
+          if (posts.size() > previousLength) {
+            for (int i = previousLength; i < posts.size(); i++) { // Write new posts to the stream
+              Message post;
+              post.set_msg(posts.at(i));
+              stream->Write(post);
+            }
+            previousLength = posts.size();
+          }
+        }
+      });
+
+      while (stream->Read(&m)) { // while there are messages being sent by the client over the stream
+
+          if (c != nullptr) {
+
+              // Convert timestamp to string
+              std::time_t timestamp_seconds = m.timestamp().seconds();
+              std::tm* timestamp_tm = std::gmtime(&timestamp_seconds);
+
+              //std::cout << "SERVER GOT MESSAGE: " << m.msg() << std::endl;
+
+              log(INFO, m.msg());
+              if (strncmp("quit",m.msg().c_str(),4) == 0) {
+                std::cout << "WARNING: CLIENT TERMINATED" << std::endl;
+                inTimeline = false;
+                break;
+              }
+
+              char time_str[50]; // Make sure the buffer is large enough
+              std::strftime(time_str, sizeof(time_str), "%a %b %d %T %Y", timestamp_tm);
+
+              std::string ffo = u + '(' + time_str + ')' + " >> " + m.msg();
+
+              // Append to user's timeline file
+              std::ofstream userFile(u + "_timeline.txt", std::ios_base::app);
+              if (userFile.is_open()) {
+                  userFile.seekp(0, std::ios_base::beg);
+                  userFile << ffo;
+                  userFile.close();
+              }
+
+
+              // Send the new message to all followers for their timeline
+              for (Client* follower : c->client_followers) {
+                  if (follower->stream != nullptr) {
+                      Message followerMessage;
+                      followerMessage.set_msg(ffo);
+
+                      if (follower->stream != nullptr) {
+                          follower->stream->Write(followerMessage);
+                      } 
+
+                  } 
+              }
+
+              // Append to  all the followers' following file
+              for (Client* follower : c->client_followers) {
+                  std::ofstream followerFile(follower->username + "_following.txt", std::ios_base::app);
+                  if (followerFile.is_open()) {
+                      followerFile.seekp(0, std::ios_base::beg);
+                      followerFile << ffo;
+                      followerFile.close();
+                  }
+              }
+          } 
+
+      }
+
+      timelineThread.join();
+      return Status::OK;
+  }
+  /*
     log(INFO,"Serving Timeline Request");
     Message message;
     Client *c;
@@ -210,6 +472,8 @@ class SNSServiceImpl final : public SNSService::Service {
       std::string username = message.username();
       int user_index = find_user(username);
       c = client_db[user_index];
+
+      std::cout << "SERVER GOT MESSAGE " << message.msg() << std::endl;
  
       //Write the current message to "username.txt"
       std::string filename = "timeline_" + username +".txt";
@@ -259,21 +523,22 @@ class SNSServiceImpl final : public SNSService::Service {
       for(it = c->client_followers.begin(); it!=c->client_followers.end(); it++){
         Client *temp_client = *it;
       	if(temp_client->stream!=0 && temp_client->connected)
-	  temp_client->stream->Write(message);
+        std::cout << "---\n\n\nWRITING MESSAGE TO CLIENT\n\n\n------";
+        temp_client->stream->Write(message);
         //For each of the current user's followers, put the message in their following.txt file
         std::string temp_username = temp_client->username;
         std::string temp_file = temp_username + "following.txt";
-	std::ofstream following_file(temp_file,std::ios::app|std::ios::out|std::ios::in);
-	following_file << fileinput;
+        std::ofstream following_file(temp_file,std::ios::app|std::ios::out|std::ios::in);
+        following_file << fileinput;
         temp_client->following_file_size++;
-	std::ofstream user_file(temp_username + ".txt",std::ios::app|std::ios::out|std::ios::in);
+        std::ofstream user_file(temp_username + ".txt",std::ios::app|std::ios::out|std::ios::in);
         user_file << fileinput;
       }
     }
     //If the client disconnected from Chat Mode, set connected to false
     c->connected = false;
     return Status::OK;
-  }
+  }*/
 
 };
 
@@ -309,8 +574,8 @@ void Heartbeat(std::string coordinatorIp, std::string coordinatorPort, ServerInf
 
 int main(int argc, char** argv) {
 
-  std::string clusterId = "1";
-  std::string serverId = "1";
+  clusterId = "1";
+  serverId = "1";
   std::string coordinatorIp = "localhost";
   std::string coordinatorPort = "9090";
   std::string port = "3010";

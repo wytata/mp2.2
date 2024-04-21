@@ -6,6 +6,7 @@
 #include <chrono>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unordered_map>
 #include <vector>
 #include <unordered_set>
 #include <filesystem>
@@ -49,15 +50,26 @@ using csce438::Confirmation;
 using csce438::ID;
 using csce438::ServerList;
 using csce438::SynchService;
+using csce438::SynchronizerListReply;
 using csce438::AllUsers;
 // tl = timeline, fl = follow list
 using csce438::TLFL;
 
 int synchID = 1;
+int clusterID = 1;
+bool isMaster = false;
+std::string coordAddr;
+std::vector<std::string> otherHosts;
+std::unordered_map<std::string, int> timelineLengths;
+
 std::vector<std::string> get_lines_from_file(std::string);
 void run_synchronizer(std::string,std::string,std::string,int);
 std::vector<std::string> get_all_users_func(int);
 std::vector<std::string> get_tl_or_fl(int, int, bool);
+std::vector<std::string> getFollowersOfUser(int clientID);
+bool file_contains_user(std::string filename, std::string user);
+void updateTimelines(int id); 
+
 void Heartbeat(std::string coordinatorIp, std::string coordinatorPort, ServerInfo serverInfo, int syncID);
 
 std::unique_ptr<csce438::CoordService::Stub> coordinator_stub_;
@@ -72,6 +84,16 @@ class SynchServiceImpl final : public SynchService::Service {
         }
 
         //return list
+        return Status::OK;
+    }
+
+    Status GetFollowersOfClient(ServerContext*, const ID* id, AllUsers* allUsers) override {
+        std::vector<std::string> followers = getFollowersOfUser(id->id());
+
+        for (auto& follower : followers) {
+            allUsers->add_users(follower);
+        }
+
         return Status::OK;
     }
 
@@ -102,6 +124,64 @@ class SynchServiceImpl final : public SynchService::Service {
 
 
         return Status::OK;
+    }
+
+    Status SynchronizerList(ServerContext* context, const ID* id, SynchronizerListReply* lists) {
+        std::cout << "Received SynchronizerList call from server" << std::endl;
+        // Update user list with client IDs this synchronizer is responsible for
+        std::vector<std::string> list = get_all_users_func(synchID);
+        for(auto s:list){
+            lists->add_all_users(s);
+        }
+
+        // Contact other synchronizers to get their client lists
+        std::unique_ptr<CoordService::Stub> coord_stub_;
+        coord_stub_ = std::unique_ptr<CoordService::Stub>(CoordService::NewStub(grpc::CreateChannel(coordAddr, grpc::InsecureChannelCredentials())));
+
+        ID sID;
+        sID.set_id(synchID);
+        ServerList followerServers;
+        ClientContext synchContext;
+        coord_stub_->GetAllFollowerServers(&synchContext, sID, &followerServers);
+
+        std::vector<std::string> hosts, ports;
+        for (std::string host : followerServers.hostname()) {
+            //std::cout << host << std::endl;
+            hosts.push_back(host);
+        }
+        for (std::string port : followerServers.port()) {
+            //std::cout << port << std::endl;
+            ports.push_back(port);
+        }
+        if (hosts.size() != ports.size()) { // sizes should be the same -> we need hostname + port to contact the other follower synchronizers
+            return Status::OK;
+        }
+        
+        std::string targetHost;
+        for (int i = 0; i < hosts.size(); i++) {
+            targetHost = hosts.at(i) + ":" + ports.at(i);
+            std::unique_ptr<SynchService::Stub> synch_stub_;
+            synch_stub_ = std::unique_ptr<SynchService::Stub>(SynchService::NewStub(grpc::CreateChannel(targetHost, grpc::InsecureChannelCredentials())));
+
+            ClientContext clientContext;
+            AllUsers allUsers;
+            Confirmation conf;
+            //std::cout << "calling GetAllUsers to " << targetHost << std::endl;
+            synch_stub_->GetAllUsers(&clientContext, conf, &allUsers);
+            for (std::string user : allUsers.users()) {
+                //std::cout << "User " << user << std::endl;
+            }
+
+            AllUsers allFollowers;
+            ClientContext followerRequestContext;
+            synch_stub_->GetFollowersOfClient(&followerRequestContext, *id, &allFollowers);
+            for (auto follower : allFollowers.users()) {
+                lists->add_followers(follower);
+            }
+        }
+
+        return Status::OK;
+
     }
 };
 
@@ -162,13 +242,15 @@ int main(int argc, char** argv) {
         }
     }
 
+    coordAddr = coordIP + ":" + coordPort;
+    clusterID = ((synchID-1) % 3) + 1;
     //std::cout << "cluster id " << std::to_string(((synchID-1) % 3) + 1) << std::endl;
     ServerInfo serverInfo;
     serverInfo.set_hostname("localhost");
     serverInfo.set_port(port);
     serverInfo.set_type("synchronizer");
     serverInfo.set_serverid(synchID);
-    serverInfo.set_clusterid(((synchID-1) % 3) + 1);
+    serverInfo.set_clusterid(clusterID);
     //std::thread sendHeartbeat(Heartbeat, coordIP, coordPort, serverInfo, synchID);
     Heartbeat(coordIP, coordPort, serverInfo, synchID);
 
@@ -199,19 +281,65 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
     while(true){
         //change this to 30 eventually
         sleep(5);
+
         grpc::ClientContext context;
         ServerList followerServers;
         ID id;
         id.set_id(synchID);
+
         coord_stub_->GetAllFollowerServers(&context, id, &followerServers);
+
         std::vector<std::string> hosts, ports;
         for (std::string host : followerServers.hostname()) {
-            std::cout << host << std::endl;
+            //std::cout << host << std::endl;
             hosts.push_back(host);
         }
         for (std::string port : followerServers.port()) {
-            std::cout << port << std::endl;
+            //std::cout << port << std::endl;
             ports.push_back(port);
+        }
+        if (hosts.size() != ports.size()) { // sizes should be the same -> we need hostname + port to contact the other follower synchronizers
+            continue;
+        }
+        
+        std::string targetHost;
+        for (int i = 0; i < hosts.size(); i++) {
+            targetHost = hosts.at(i) + ":" + ports.at(i);
+            synch_stub_ = std::unique_ptr<SynchService::Stub>(SynchService::NewStub(grpc::CreateChannel(targetHost, grpc::InsecureChannelCredentials())));
+            ClientContext clientContext;
+
+            // Get all the users on other clusters
+            AllUsers allUsers;
+            Confirmation conf;
+            //std::cout << "calling GetAllUsers to " << targetHost << std::endl;
+            synch_stub_->GetAllUsers(&clientContext, conf, &allUsers);
+            for (std::string user : allUsers.users()) {
+                //std::cout << "User " << user << std::endl;
+                std::string usersFile = "./cluster_" + std::to_string(clusterID) + "/1/all_users.txt";
+                std::ofstream userStream(usersFile,std::ios::app|std::ios::out|std::ios::in);
+                if (!file_contains_user(usersFile, user)) {
+                    userStream << user << std::endl;
+                }
+            }
+
+            // For each user in this cluster, find out which users on other clusters are following them
+            for (auto client : get_all_users_func(synchID)) {
+                ClientContext getFollowersContext;
+                AllUsers allFollowers;
+                ID id;
+                id.set_id(atoi(client.c_str()));
+                synch_stub_->GetFollowersOfClient(&getFollowersContext, id, &allFollowers);
+                std::string followerFile = "./cluster_" + std::to_string(clusterID) + "/1/" + client + "_followers.txt";
+                std::ofstream followerStream(followerFile,std::ios::app|std::ios::out|std::ios::in);
+                for (auto follower : allFollowers.users()) {
+                    if (!file_contains_user(followerFile, follower)) {
+                        followerStream << follower << std::endl;
+                    }
+                }
+                
+                updateTimelines(atoi(client.c_str()));
+            }
+
         }
         //synch all users file 
             //get list of all followers
@@ -285,7 +413,12 @@ void Heartbeat(std::string coordinatorIp, std::string coordinatorPort, ServerInf
   csce438::Confirmation confirmation;
   stub->Heartbeat(&clientContext, serverInfo, &confirmation);
   if (!confirmation.status()) {
-    log(ERROR, "Failed to send heartbeat to coordinator.");
+    //log(ERROR, "Failed to send heartbeat to coordinator.");
+    //std::cout << "I am paired with the slave server" << std::endl;
+    isMaster = false;
+  } else {
+    //std::cout << "I am paired with the master server" << std::endl;
+    isMaster = true;
   }
   // Call Heartbeat RPC every five seconds
   /*while (true) {
@@ -332,14 +465,16 @@ std::vector<std::string> get_all_users_func(int synchID){
 }
 
 std::vector<std::string> get_tl_or_fl(int synchID, int clientID, bool tl){
-    std::string master_fn = "./master"+std::to_string(synchID)+"/"+std::to_string(clientID);
-    std::string slave_fn = "./slave"+std::to_string(synchID)+"/" + std::to_string(clientID);
+    //std::string master_fn = "./master"+std::to_string(synchID)+"/"+std::to_string(clientID);
+    //std::string slave_fn = "./slave"+std::to_string(synchID)+"/" + std::to_string(clientID);
+    std::string master_fn = "cluster_"+std::to_string(clusterID)+"/1/"+std::to_string(clientID);
+    std::string slave_fn = "cluster_"+std::to_string(clusterID)+"/2/"+std::to_string(clientID);
     if(tl){
-        master_fn.append("_timeline");
-        slave_fn.append("_timeline");
+        master_fn.append("_timeline.txt");
+        slave_fn.append("_timeline.txt");
     }else{
-        master_fn.append("_follow_list");
-        slave_fn.append("_follow_list");
+        master_fn.append("_followers.txt");
+        slave_fn.append("_followers.txt");
     }
 
     std::vector<std::string> m = get_lines_from_file(master_fn);
@@ -352,3 +487,70 @@ std::vector<std::string> get_tl_or_fl(int synchID, int clientID, bool tl){
     }
 
 }
+
+void updateTimelines(int id) { // For client with id ID, update feeds of users on this cluster following given client(Only if given client is not in this cluster)
+    int clientCluster = ((id-1) % 3) + 1;
+    if (clientCluster == clusterID) { // Return, as it is not necessary to synchronize this timeline
+        return;
+    }
+
+    ServerInfo server;
+    ID clientID;
+    clientID.set_id(id);
+    ClientContext context;
+
+    std::unique_ptr<CoordService::Stub> coord_stub_;
+    coord_stub_ = std::unique_ptr<CoordService::Stub>(CoordService::NewStub(grpc::CreateChannel(coordAddr, grpc::InsecureChannelCredentials())));
+
+    coord_stub_->GetFollowerServer(&context, clientID, &server);
+
+    std::string targetSynchronizer = server.hostname() + ":" + server.port();
+    std::unique_ptr<SynchService::Stub> synch_stub_;
+    synch_stub_ = std::unique_ptr<SynchService::Stub>(SynchService::NewStub(grpc::CreateChannel(targetSynchronizer, grpc::InsecureChannelCredentials())));
+
+    ClientContext timelineContext;
+    TLFL tlfl;
+    synch_stub_->GetTLFL(&timelineContext, clientID, &tlfl);
+    std::vector<std::string> timeline;
+    for (auto post : tlfl.tl()) {
+        timeline.push_back(post);
+    }
+    // Now we will only append NEW posts to user feeds, that is, posts that have been made
+    // since the previous timeline update. We do this by checking the previous timeline's size
+    int previousTimelineSize;
+    if (timelineLengths.find(std::to_string(id)) == timelineLengths.end()) {
+        timelineLengths.insert({std::to_string(id), 0});
+        previousTimelineSize = 0;
+    } else {
+        previousTimelineSize = timelineLengths.at(std::to_string(id));
+    }
+    for (auto user : get_all_users_func(synchID)) {
+        std::string followingFile = "cluster_" + std::to_string(clusterID) + "/1/" + user + "_following.txt";
+        std::string followListFile = "cluster_" + std::to_string(clusterID) + "/1/" + user + "_follow_list.txt";
+        if (file_contains_user(followListFile, std::to_string(id))) {
+            std::ofstream feed(followingFile,std::ios::app|std::ios::out|std::ios::in);
+            for (int i = previousTimelineSize; i < timeline.size(); i++) {
+                feed << timeline.at(i) << std::endl;
+            }
+        }
+    }
+    
+    timelineLengths.at(std::to_string(id)) = timeline.size();
+}
+
+std::vector<std::string> getFollowersOfUser(int ID) {
+    std::vector<std::string> followers;
+    std::string clientID = std::to_string(ID);
+    std::vector<std::string> usersInCluster = get_all_users_func(synchID);
+
+    for (auto userID : usersInCluster) { // Examine each user's following file
+        std::string file = "cluster_" + std::to_string(clusterID) + "/1/" + userID + "_follow_list.txt";
+        //std::cout << "Reading file " << file << std::endl;
+        if (file_contains_user(file, clientID)) {
+            followers.push_back(userID);
+        }
+    }
+
+    return followers;
+}
+

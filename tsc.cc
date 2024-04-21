@@ -324,6 +324,7 @@ volatile sig_atomic_t signalReceived = 0;
 // Signal handler
 void signalHandler(int signum) {
     signalReceived = 1;
+    std::cout << "Hello signal world" << std::endl;
 }
 
 
@@ -382,6 +383,12 @@ void Client::Timeline(const std::string& username) {
     std::thread writer_thread([&]() {
         while (true) {
             if (signalReceived) { // a SIGINT was received
+                std::cout << "RECEIVED SIGINT" << std::endl;
+                m.set_msg("quit");
+                stream->Write(m);
+                exit(1);
+                //return;
+
                 signalReceived = 0;
                 Request request;
                 Reply reply;
@@ -393,7 +400,7 @@ void Client::Timeline(const std::string& username) {
                 grpc::Status status = this->stub_->UnFollow(&context_term, request, &reply); // calling unfollow for cleanup of client stream
                 stream->WritesDone();
 
-                exit(1);
+                //exit(1);
             } else {
 
                 // normal writing stuff
@@ -410,6 +417,13 @@ void Client::Timeline(const std::string& username) {
                     stream->Write(m);
                 } else { // perform the same kind of cleanup of client's stream via calling unfollow as this avoids segfaults if a dead stream is written to
 
+                    std::cout << "RECEIVED SIGINT" << std::endl;
+                    m.set_msg("quit");
+                    stream->Write(m);
+                    exit(1);
+                    //return;
+
+                    m.set_msg("quit");
                     signalReceived = 0;
                     Request request;
                     Reply reply;
@@ -421,7 +435,8 @@ void Client::Timeline(const std::string& username) {
                     grpc::Status status = this->stub_->UnFollow(&context_term, request, &reply);
                     stream->WritesDone();
 
-                    exit(1);
+                    //exit(1);
+                    return;
                 }
             }
 
@@ -443,6 +458,7 @@ void Client::Timeline(const std::string& username) {
                 std::cout << message << std::endl; // printing the server's message via the stream to the timeline
             } 
         }
+        return;
 
         Request request; // cleanup of stream via calling unfollow as done above multiple times
         Reply reply;
@@ -453,6 +469,7 @@ void Client::Timeline(const std::string& username) {
 
         grpc::Status status = this->stub_->UnFollow(&context_term, request, &reply);
         exit(1);
+        //return;
     });
 
 

@@ -29,6 +29,7 @@ message ServerInfo{
     string port = 3;
     string type = 4;
     int32 clusterID = 5;
+    bool isMaster = 6;
 }
 // TODO: check which extra stuff in the coordinator.proto you dont need
 
@@ -59,6 +60,11 @@ message AllUsers{
     repeated string users = 1; 
 }
 
+message SynchronizerListReply {
+  repeated string all_users = 1;
+  repeated string followers = 2;
+}
+
 
 // ServerList definition
 message ServerList{
@@ -75,9 +81,10 @@ message ServerList{
 // SynchService definition
 service SynchService{
     rpc GetAllUsers(Confirmation) returns (AllUsers) {}
+    rpc GetFollowersOfClient(ID) returns (AllUsers) {}
     rpc GetTLFL(ID) returns (TLFL) {}
     rpc ResynchServer(ServerInfo) returns (Confirmation) {}
-
+    rpc SynchronizerList(ID) returns (SynchronizerListReply) {}
 }
 
 

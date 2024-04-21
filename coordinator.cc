@@ -49,6 +49,7 @@ struct zNode{
     std::string type;
     std::time_t last_heartbeat;
     bool missed_heartbeat;
+    bool isMaster;
     bool isActive();
 
 };
@@ -109,9 +110,18 @@ class CoordServiceImpl final : public CoordService::Service {
             toAdd->hostname = serverinfo->hostname();
             toAdd->type = serverinfo->type();
             synchronizers.at(clusterID-1).push_back(toAdd);
-          }
-          s_mutex.unlock();
-          confirmation->set_status(true);
+
+            // To determine whether the server on the same machine as this synchronizer is the cluster master, we check the corresponding index
+            // in the database of servers
+              
+            int pairedServerIndex = synchronizers.at(clusterID-1).size() - 1;
+            if (clusters.at(clusterID-1).size() > pairedServerIndex) {
+              // Use the confirmation response to tell the synchronizer whether they are the master/slave
+              confirmation->set_status(clusters.at(clusterID-1).at(pairedServerIndex)->isMaster); // true if master, otherwise false
+            } else {
+              confirmation->set_status(false); 
+            }
+          } s_mutex.unlock();
           return Status::OK;
         }
 
@@ -120,6 +130,7 @@ class CoordServiceImpl final : public CoordService::Service {
         
         if (serverIndex == -1) {
           // Server not found in cluster -> first heartbeat from server, so it must be initialized
+          std::cout << "Adding new server in cluster " << clusterID << " to database" << std::endl;
           zNode* toAdd = new zNode();
           toAdd->serverID = serverinfo->serverid();
           toAdd->port = serverinfo->port();
@@ -127,6 +138,11 @@ class CoordServiceImpl final : public CoordService::Service {
           toAdd->type = serverinfo->type();
           toAdd->last_heartbeat = getTimeNow();
           toAdd->missed_heartbeat = false;
+          toAdd->isMaster = false;
+          if (clusters.at(clusterID-1).size() == 0) { // must be the first server entered into the database to become the master
+            std::cout << "Setting server " << serverID << " as master" << std::endl;
+            toAdd->isMaster = true;
+          }
 
           clusters.at(clusterID-1).push_back(toAdd);
 
@@ -195,13 +211,29 @@ class CoordServiceImpl final : public CoordService::Service {
       return Status::OK;
     }
 
-    /*Status GetFollowerServer(ServerContext* context, const ID* id, ServerList* serverList) override {
+    Status GetFollowerServer(ServerContext* context, const ID* id, ServerInfo* serverInfo) {
       int clientID = id->id();
       int clientCluster = ((clientID - 1) % 3) + 1;
-      for (int i = 0; i < synchronizers.at(clientCluster).size(); i++) { // obtain first active server
-        
-      }
-    }*/
+
+      auto server = synchronizers.at(clientCluster-1).at(0);
+      serverInfo->set_serverid(server->serverID);
+      serverInfo->set_port(server->port);
+      serverInfo->set_type(server->type);
+      serverInfo->set_hostname(server->hostname);
+      serverInfo->set_ismaster(server->isMaster);
+      /*for (int i = 0; i < synchronizers.at(clientCluster-1).size(); i++) { 
+        auto server = synchronizers.at(clientCluster-1).at(i);
+        if (server->isMaster) {
+        serverInfo->set_serverid(server->serverID);
+        serverInfo->set_port(server->port);
+        serverInfo->set_type(server->type);
+        serverInfo->set_hostname(server->hostname);
+        serverInfo->set_ismaster(server->isMaster);
+        }
+      }*/ 
+      
+      return Status::OK;
+    }
 };
 
 void RunServer(std::string port_no){
