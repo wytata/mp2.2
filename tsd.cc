@@ -42,6 +42,7 @@
 #include <fstream>
 #include <iostream>
 #include <filesystem>
+#include <pthread.h>
 #include <thread>
 #include <semaphore.h>
 #include <memory>
@@ -56,6 +57,7 @@
 #include<glog/logging.h>
 #define log(severity, msg) LOG(severity) << msg; google::FlushLogFiles(google::severity); 
 
+#include "sns.pb.h"
 #include "sns.grpc.pb.h"
 #include "coordinator.grpc.pb.h"
 #include "coordinator.pb.h"
@@ -97,6 +99,8 @@ struct Client {
 std::vector<Client*> client_db;
 //Cluster ID
 std::string clusterId, serverId;
+bool isMaster = false;
+std::unique_ptr<SNSService::Stub> slave_stub_ = nullptr; // slave stub used for replications of all master server interactions onto slave server
 
 //Helper function used to find a Client object given its username
 int find_user(std::string username){
@@ -224,6 +228,11 @@ class SNSServiceImpl final : public SNSService::Service {
   }
 
   Status Follow(ServerContext* context, const Request* request, Reply* reply) override {
+    // First, replicate this RPC call onto the slave server, as we want it to maintain this following relationship
+    ClientContext clientContext;
+    if (slave_stub_ != NULL && isMaster) {
+      slave_stub_->Follow(&clientContext, *request, reply);
+    }
 
     std::string username1 = request->username();
     std::string username2 = request->arguments(0);
@@ -291,6 +300,16 @@ class SNSServiceImpl final : public SNSService::Service {
 
   // RPC Login
   Status Login(ServerContext* context, const Request* request, Reply* reply) override {
+    ClientContext clientContext;
+    if (slave_stub_ != NULL && isMaster) {
+      ClientContext duplicateContext;
+      Request duplicateRequest;
+      duplicateRequest.set_username(request->username());
+      Reply duplicateReply;
+      slave_stub_->Login(&duplicateContext, duplicateRequest, &duplicateReply);
+    } else {
+      std::cout << "GO STUPID RAHHH" << std::endl;
+    }
     Client* c = new Client();
     std::string username = request->username();
     log(INFO, "Serving Login Request: " + username + "\n");
@@ -321,6 +340,45 @@ class SNSServiceImpl final : public SNSService::Service {
         user->connected = true;
       }
     }
+    return Status::OK;
+  }
+
+  Status SlaveTimelineUpdate(ServerContext* context, const Message* message, Reply* reply) override {
+    std::cout << "GOT SLAVE TIMELINE UPDATE" << std::endl;
+    Client* c; 
+    std::string username = message->username();
+    c = client_db.at(find_user(username));
+
+    if (strncmp("quit",message->msg().c_str(),4) == 0) {
+      return Status::OK;
+    }
+
+    std::time_t timestamp_seconds = message->timestamp().seconds();
+    std::tm* timestamp_tm = std::gmtime(&timestamp_seconds);
+    char time_str[50]; // Make sure the buffer is large enough
+    std::strftime(time_str, sizeof(time_str), "%a %b %d %T %Y", timestamp_tm);
+
+    std::string ffo = username + '(' + time_str + ')' + " >> " + message->msg();
+
+    // Append to user's timeline file
+    std::ofstream userFile(username + "_timeline.txt", std::ios_base::app);
+    if (userFile.is_open()) {
+        userFile.seekp(0, std::ios_base::beg);
+        userFile << ffo;
+        userFile.close();
+    }
+
+    // Append to followers' following file 
+    for (Client* follower : c->client_followers) {
+        std::ofstream followerFile(follower->username + "_following.txt", std::ios_base::app);
+        if (followerFile.is_open()) {
+            followerFile.seekp(0, std::ios_base::beg);
+            followerFile << ffo;
+            followerFile.close();
+
+        }
+    }
+    reply->set_msg("done");
     return Status::OK;
   }
     
@@ -390,7 +448,7 @@ class SNSServiceImpl final : public SNSService::Service {
         std::string userFeed = u + "_following.txt";
         previousLength = get_lines_from_file(userFeed).size();
         while (inTimeline) {
-          sleep(5);
+          sleep(1);
           // Check timeline file for updates, write to stream accordingly
           std::vector<std::string> posts = get_lines_from_file(userFeed);
           if (posts.size() > previousLength) {
@@ -408,6 +466,19 @@ class SNSServiceImpl final : public SNSService::Service {
 
           if (c != nullptr) {
 
+              ClientContext slaveContext;
+              Message slaveMessage;
+              slaveMessage.set_msg(m.msg());
+              slaveMessage.set_username(m.username());
+              Reply slaveReply;
+              if (slave_stub_ != NULL && isMaster) {
+                std::cout << "calling SlaveTimelineUpdate" << std::endl;
+                const Status s = slave_stub_->SlaveTimelineUpdate(&slaveContext, slaveMessage, &slaveReply);
+                if (!s.ok()) {
+                  std::cout << std::to_string(s.error_code()) << std::endl;
+                  std::cout << "Couldn't execute slave update" << std::endl;
+                }
+              }
               // Convert timestamp to string
               std::time_t timestamp_seconds = m.timestamp().seconds();
               std::tm* timestamp_tm = std::gmtime(&timestamp_seconds);
@@ -442,7 +513,7 @@ class SNSServiceImpl final : public SNSService::Service {
                       followerMessage.set_msg(ffo);
 
                       if (follower->stream != nullptr) {
-                          follower->stream->Write(followerMessage);
+                          //follower->stream->Write(followerMessage);
                       } 
 
                   } 
@@ -566,8 +637,19 @@ void Heartbeat(std::string coordinatorIp, std::string coordinatorPort, ServerInf
     ClientContext clientContext;
     csce438::Confirmation confirmation;
     stub->Heartbeat(&clientContext, serverInfo, &confirmation);
-    if (!confirmation.status()) {
-      log(ERROR, "Failed to send heartbeat to coordinator.");
+    isMaster = confirmation.status();
+    if (isMaster) {
+      // Need to get slave's info
+      ClientContext getSlaveContext;
+      ID id;
+      ServerInfo slaveInfo;
+      id.set_id(atoi(clusterId.c_str()));
+      stub->GetSlave(&getSlaveContext, id, &slaveInfo);
+      if (!slaveInfo.hostname().empty() && slave_stub_ == NULL) {
+        std::cout << "GOT SLAVE AT " << slaveInfo.hostname() + ":" + slaveInfo.port() << std::endl;
+        slave_stub_ = std::unique_ptr<SNSService::Stub>(SNSService::NewStub(grpc::CreateChannel(slaveInfo.hostname() + ":" + slaveInfo.port(), grpc::InsecureChannelCredentials())));
+
+      }
     }
   }
 }

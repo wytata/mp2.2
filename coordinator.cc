@@ -142,21 +142,48 @@ class CoordServiceImpl final : public CoordService::Service {
           if (clusters.at(clusterID-1).size() == 0) { // must be the first server entered into the database to become the master
             std::cout << "Setting server " << serverID << " as master" << std::endl;
             toAdd->isMaster = true;
+            confirmation->set_status(true);
+          } else {
+            std::cout << "Setting server " << serverID << " as slave" << std::endl;
+            toAdd->isMaster = false;
+            confirmation->set_status(false);
+
           }
 
           clusters.at(clusterID-1).push_back(toAdd);
 
         } else {
           zNode* targetServer = clusters.at(clusterID-1).at(serverIndex);
+          confirmation->set_status(targetServer->isMaster);
           targetServer->missed_heartbeat = false;
           targetServer->last_heartbeat = getTimeNow();
         }
 
 
         v_mutex.unlock();
-        confirmation->set_status(true);
 
         return Status::OK;
+    }
+
+    // Server sends its cluster ID and in response, gets information of Slave on same cluster
+    Status GetSlave (ServerContext* context, const ID* id, ServerInfo* serverinfo) {
+      int clusterID = id->id(); 
+      v_mutex.lock();
+  
+      auto cluster = clusters.at(clusterID-1);
+      for (auto server : cluster) {
+        if (server->isActive() && !server->isMaster) {
+          serverinfo->set_port(server->port);
+          serverinfo->set_hostname(server->hostname);
+          serverinfo->set_type(server->type);
+          serverinfo->set_serverid(server->serverID);
+          // We really only want the hostname and port info as this is for master-slave RPC communication only, but other info may be useful
+          break;
+        }
+      }
+
+      v_mutex.unlock();
+      return Status::OK;
     }
 
     //function returns the server information for requested client id

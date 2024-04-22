@@ -9,6 +9,7 @@ import "google/protobuf/timestamp.proto";
 
 //Init and Heartbeat potentially redundant
 service CoordService{
+    rpc GetSlave (ID) returns (ServerInfo) {}
     rpc Heartbeat (ServerInfo) returns (Confirmation) {}
     rpc GetServer (ID) returns (ServerInfo) {}
     /* // ZooKeeper API here */
