@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <locale>
 #include <memory>
@@ -14,6 +15,8 @@
 #include "coordinator.grpc.pb.h"
 #include "coordinator.pb.h"
 #include "sns.grpc.pb.h"
+#include<glog/logging.h>
+#define log(severity, msg) LOG(severity) << msg; google::FlushLogFiles(google::severity); 
 #include "sns.pb.h"
 using grpc::Channel;
 using grpc::ClientContext;
@@ -229,7 +232,7 @@ IReply Client::List() {
     }else{
         /* std::cout << "grpc status bad\n"; */
     }
-
+        
     return ire;
 }
 
@@ -324,7 +327,6 @@ volatile sig_atomic_t signalReceived = 0;
 // Signal handler
 void signalHandler(int signum) {
     signalReceived = 1;
-    std::cout << "Hello signal world" << std::endl;
 }
 
 
@@ -383,7 +385,6 @@ void Client::Timeline(const std::string& username) {
     std::thread writer_thread([&]() {
         while (true) {
             if (signalReceived) { // a SIGINT was received
-                std::cout << "RECEIVED SIGINT" << std::endl;
                 m.set_msg("quit");
                 stream->Write(m);
                 exit(1);
@@ -417,7 +418,6 @@ void Client::Timeline(const std::string& username) {
                     stream->Write(m);
                 } else { // perform the same kind of cleanup of client's stream via calling unfollow as this avoids segfaults if a dead stream is written to
 
-                    std::cout << "RECEIVED SIGINT" << std::endl;
                     m.set_msg("quit");
                     stream->Write(m);
                     exit(1);

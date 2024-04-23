@@ -127,7 +127,6 @@ class CoordServiceImpl final : public CoordService::Service {
         
         if (serverIndex == -1) {
           // Server not found in cluster -> first heartbeat from server, so it must be initialized
-          std::cout << "Adding new server in cluster " << clusterID << " to database" << std::endl;
           zNode* toAdd = new zNode();
           toAdd->serverID = serverinfo->serverid();
           toAdd->port = serverinfo->port();
@@ -138,11 +137,9 @@ class CoordServiceImpl final : public CoordService::Service {
           toAdd->missedHeartbeats = 0;
           toAdd->isMaster = false;
           if (clusters.at(clusterID-1).size() == 0) { // must be the first server entered into the database to become the master
-            std::cout << "Setting server " << serverID << " as master" << std::endl;
             toAdd->isMaster = true;
             confirmation->set_status(true);
           } else {
-            std::cout << "Setting server " << serverID << " as slave" << std::endl;
             toAdd->isMaster = false;
             confirmation->set_status(false);
 
@@ -191,6 +188,7 @@ class CoordServiceImpl final : public CoordService::Service {
 
     // Server sends its cluster ID and in response, gets information of Slave on same cluster
     Status GetSlave (ServerContext* context, const ID* id, ServerInfo* serverinfo) {
+      log(INFO, "Getting slave server for server in cluster " + std::to_string(id->id()));
       int clusterID = id->id(); 
       v_mutex.lock();
   
@@ -236,15 +234,6 @@ class CoordServiceImpl final : public CoordService::Service {
               return Status::OK;
             }
           }
-          /*zNode* targetServer = clusters.at(clusterId-1).at(serverId-1); 
-          //zNode* targetServer = cluster.at(findServer(cluster, serverId)); 
-          serverinfo->set_port(targetServer->port);
-          serverinfo->set_type(targetServer->type);
-          serverinfo->set_hostname(targetServer->hostname);
-          serverinfo->set_serverid(targetServer->serverID);
-          serverinfo->set_clusterid(clusterId);
-          log(INFO, "Directed client " + std::to_string(clientId) + " to server " + std::to_string(targetServer->serverID) + " in cluster " + std::to_string(clusterId));*/
-
         }
         v_mutex.unlock();
 
@@ -253,8 +242,8 @@ class CoordServiceImpl final : public CoordService::Service {
     }
 
     Status GetAllFollowerServers(ServerContext* context, const ID* id, ServerList* serverList) override {
+      log(INFO, "Getting all follower servers for synchronizer " + std::to_string(id->id()));
       int clusterID = id->id();
-      //std::cout << "request from syncrhonizer " << std::to_string(clusterID) << std::endl;
 
       s_mutex.lock();
       for (int i = 0; i < synchronizers.size(); i++) {
@@ -277,6 +266,7 @@ class CoordServiceImpl final : public CoordService::Service {
     }
 
     Status GetFollowerServer(ServerContext* context, const ID* id, ServerInfo* serverInfo) {
+      log(INFO, "Getting follower server of client " + std::to_string(id->id()));
       int clientID = id->id();
       int clientCluster = ((clientID - 1) % 3) + 1;
 
@@ -286,17 +276,6 @@ class CoordServiceImpl final : public CoordService::Service {
       serverInfo->set_type(server->type);
       serverInfo->set_hostname(server->hostname);
       serverInfo->set_ismaster(server->isMaster);
-      /*for (int i = 0; i < synchronizers.at(clientCluster-1).size(); i++) { 
-        auto server = synchronizers.at(clientCluster-1).at(i);
-        if (server->isMaster) {
-        serverInfo->set_serverid(server->serverID);
-        serverInfo->set_port(server->port);
-        serverInfo->set_type(server->type);
-        serverInfo->set_hostname(server->hostname);
-        serverInfo->set_ismaster(server->isMaster);
-        }
-      }*/ 
-      
       return Status::OK;
     }
 };
@@ -357,11 +336,8 @@ int findServer(std::vector<zNode*> v, int id) {
 }
 
 void checkHeartbeat(){
+    log(INFO, "Checking for heartbeats from servers");
     while(true){
-        //check servers for heartbeat > 10
-        //if true turn missed heartbeat = true
-        // Your code below
-
         v_mutex.lock();
 
         // iterating through the clusters vector of vectors of znodes
