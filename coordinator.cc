@@ -44,6 +44,7 @@ using csce438::SynchService;
 
 struct zNode{
     int serverID;
+    int missedHeartbeats;
     std::string hostname;
     std::string port;
     std::string type;
@@ -103,26 +104,22 @@ class CoordServiceImpl final : public CoordService::Service {
           s_mutex.lock();
           serverIndex = findServer(synchronizers.at(clusterID-1), serverID);
           if (serverIndex == -1) { // synchronizer doesn't yet exist in coordinator database.
-            //std::cout << "adding new synchronizer server in cluster " << clusterID << " to database" << std::endl;
-            zNode* toAdd = new zNode();
-            toAdd->serverID = serverinfo->serverid();
-            toAdd->port = serverinfo->port();
-            toAdd->hostname = serverinfo->hostname();
-            toAdd->type = serverinfo->type();
-            synchronizers.at(clusterID-1).push_back(toAdd);
-
-            // To determine whether the server on the same machine as this synchronizer is the cluster master, we check the corresponding index
-            // in the database of servers
-              
-            int pairedServerIndex = synchronizers.at(clusterID-1).size() - 1;
-            if (clusters.at(clusterID-1).size() > pairedServerIndex) {
-              // Use the confirmation response to tell the synchronizer whether they are the master/slave
-              confirmation->set_status(clusters.at(clusterID-1).at(pairedServerIndex)->isMaster); // true if master, otherwise false
-            } else {
-              confirmation->set_status(false); 
-            }
-          } s_mutex.unlock();
-          return Status::OK;
+              //std::cout << "adding new synchronizer server in cluster " << clusterID << " to database" << std::endl;
+              zNode* toAdd = new zNode();
+              toAdd->serverID = serverinfo->serverid();
+              toAdd->port = serverinfo->port();
+              toAdd->hostname = serverinfo->hostname();
+              toAdd->type = serverinfo->type();
+              toAdd->isMaster = false;
+              if (synchronizers.at(clusterID-1).size() == 0) {
+                toAdd->isMaster = true;
+              }
+              synchronizers.at(clusterID-1).push_back(toAdd);
+              confirmation->set_status(toAdd->isMaster);
+          
+              s_mutex.unlock();
+              return Status::OK;
+          }
         }
 
         v_mutex.lock();
@@ -138,6 +135,7 @@ class CoordServiceImpl final : public CoordService::Service {
           toAdd->type = serverinfo->type();
           toAdd->last_heartbeat = getTimeNow();
           toAdd->missed_heartbeat = false;
+          toAdd->missedHeartbeats = 0;
           toAdd->isMaster = false;
           if (clusters.at(clusterID-1).size() == 0) { // must be the first server entered into the database to become the master
             std::cout << "Setting server " << serverID << " as master" << std::endl;
@@ -154,6 +152,32 @@ class CoordServiceImpl final : public CoordService::Service {
 
         } else {
           zNode* targetServer = clusters.at(clusterID-1).at(serverIndex);
+          for (auto& server : clusters.at(clusterID-1)) { // Find the master, and if it has missed two heartbeats, we will set this server to the master
+            if (server->missedHeartbeats >= 2 && server->isMaster) {
+              targetServer->isMaster = true;
+              server->isMaster = false;
+
+              // In this case, we also need to mark the proper synchronizer as a master and demote the current master
+              // This is not the most optimal way of doing this, but I am not necessarily operating under the assumption 
+              // of having only two servers. If that were the case, then I could perform a simple swap of roles (master,slave)
+              int masterIndex, slaveIndex;
+              for (int i = 0; i < synchronizers.at(clusterID-1).size(); i++) {
+                if (synchronizers.at(clusterID-1).at(i)->isMaster) {
+                  masterIndex = i;
+                  break;
+                }
+              }
+              for (int i = 0; i < synchronizers.at(clusterID-1).size(); i++) {
+                if (!synchronizers.at(clusterID-1).at(i)->isMaster) {
+                  slaveIndex = i;
+                  break;
+                }
+              }
+              std::cout << "slave " << slaveIndex << " master " << masterIndex << std::endl;
+              synchronizers.at(clusterID-1).at(slaveIndex)->isMaster = true;
+              synchronizers.at(clusterID-1).at(masterIndex)->isMaster = false;
+            }
+          }
           confirmation->set_status(targetServer->isMaster);
           targetServer->missed_heartbeat = false;
           targetServer->last_heartbeat = getTimeNow();
@@ -200,14 +224,26 @@ class CoordServiceImpl final : public CoordService::Service {
           serverinfo->set_serverid(-1);
           log(INFO, "No server available for client in cluster " + std::to_string(clusterId));
         } else {
-          zNode* targetServer = clusters.at(clusterId-1).at(serverId-1); 
+          for (auto server : clusters.at(clusterId-1)) {
+            if (server->isMaster) {
+              serverinfo->set_port(server->port);
+              serverinfo->set_type(server->type);
+              serverinfo->set_hostname(server->hostname);
+              serverinfo->set_serverid(server->serverID);
+              serverinfo->set_clusterid(clusterId);
+              log(INFO, "Directed client " + std::to_string(clientId) + " to server " + std::to_string(server->serverID) + " in cluster " + std::to_string(clusterId));
+              v_mutex.unlock();
+              return Status::OK;
+            }
+          }
+          /*zNode* targetServer = clusters.at(clusterId-1).at(serverId-1); 
           //zNode* targetServer = cluster.at(findServer(cluster, serverId)); 
           serverinfo->set_port(targetServer->port);
           serverinfo->set_type(targetServer->type);
           serverinfo->set_hostname(targetServer->hostname);
           serverinfo->set_serverid(targetServer->serverID);
           serverinfo->set_clusterid(clusterId);
-          log(INFO, "Directed client " + std::to_string(clientId) + " to server " + std::to_string(targetServer->serverID) + " in cluster " + std::to_string(clusterId));
+          log(INFO, "Directed client " + std::to_string(clientId) + " to server " + std::to_string(targetServer->serverID) + " in cluster " + std::to_string(clusterId));*/
 
         }
         v_mutex.unlock();
@@ -226,10 +262,12 @@ class CoordServiceImpl final : public CoordService::Service {
         if (i != clusterID - 1) { // Synchronizer calling RPC does not need synchronizer info from its own cluster
           for (auto& synchronizer : synchronizers.at(i)) {
             //std::cout << "got into inner loop\n";
-            serverList->add_port(synchronizer->port);
-            serverList->add_type(synchronizer->type);
-            serverList->add_serverid(synchronizer->serverID);
-            serverList->add_hostname(synchronizer->hostname);
+            if (synchronizer->isMaster) {
+              serverList->add_port(synchronizer->port);
+              serverList->add_type(synchronizer->type);
+              serverList->add_serverid(synchronizer->serverID);
+              serverList->add_hostname(synchronizer->hostname);
+            }
           }
         }
       }
@@ -333,7 +371,10 @@ void checkHeartbeat(){
                     std::cout << "missed heartbeat from server " << s->serverID << std::endl;
                     if(!s->missed_heartbeat){
                         s->missed_heartbeat = true;
+                        s->missedHeartbeats++;
                         s->last_heartbeat = getTimeNow();
+                    } else { // Two missed heartbeats. We must notify slave server that it will take over as master
+                        s->missedHeartbeats++;
                     }
                 }
             }

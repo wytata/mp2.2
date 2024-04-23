@@ -59,6 +59,7 @@ int synchID = 1;
 int clusterID = 1;
 bool isMaster = false;
 std::string coordAddr;
+std::string clusterSubdirectory;
 std::vector<std::string> otherHosts;
 std::unordered_map<std::string, int> timelineLengths;
 
@@ -314,8 +315,7 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
             //std::cout << "calling GetAllUsers to " << targetHost << std::endl;
             synch_stub_->GetAllUsers(&clientContext, conf, &allUsers);
             for (std::string user : allUsers.users()) {
-                //std::cout << "User " << user << std::endl;
-                std::string usersFile = "./cluster_" + std::to_string(clusterID) + "/1/all_users.txt";
+                std::string usersFile = "./cluster_" + std::to_string(clusterID) + "/" + clusterSubdirectory + "/all_users.txt";
                 std::ofstream userStream(usersFile,std::ios::app|std::ios::out|std::ios::in);
                 if (!file_contains_user(usersFile, user)) {
                     userStream << user << std::endl;
@@ -329,7 +329,7 @@ void run_synchronizer(std::string coordIP, std::string coordPort, std::string po
                 ID id;
                 id.set_id(atoi(client.c_str()));
                 synch_stub_->GetFollowersOfClient(&getFollowersContext, id, &allFollowers);
-                std::string followerFile = "./cluster_" + std::to_string(clusterID) + "/1/" + client + "_followers.txt";
+                std::string followerFile = "./cluster_" + std::to_string(clusterID) + "/" + clusterSubdirectory + "/" + client + "_followers.txt";
                 std::ofstream followerStream(followerFile,std::ios::app|std::ios::out|std::ios::in);
                 for (auto follower : allFollowers.users()) {
                     if (!file_contains_user(followerFile, follower)) {
@@ -416,10 +416,13 @@ void Heartbeat(std::string coordinatorIp, std::string coordinatorPort, ServerInf
     //log(ERROR, "Failed to send heartbeat to coordinator.");
     //std::cout << "I am paired with the slave server" << std::endl;
     isMaster = false;
+    clusterSubdirectory = "2";
   } else {
     //std::cout << "I am paired with the master server" << std::endl;
     isMaster = true;
+    clusterSubdirectory = "1";
   }
+  std::cout << "Cluster subdirectory is " << clusterSubdirectory << std::endl;
   // Call Heartbeat RPC every five seconds
   /*while (true) {
     ClientContext newContext;
@@ -525,8 +528,8 @@ void updateTimelines(int id) { // For client with id ID, update feeds of users o
         previousTimelineSize = timelineLengths.at(std::to_string(id));
     }
     for (auto user : get_all_users_func(synchID)) {
-        std::string followingFile = "cluster_" + std::to_string(clusterID) + "/1/" + user + "_following.txt";
-        std::string followListFile = "cluster_" + std::to_string(clusterID) + "/1/" + user + "_follow_list.txt";
+        std::string followingFile = "cluster_" + std::to_string(clusterID) + "/" + clusterSubdirectory + "/" + user + "_following.txt";
+        std::string followListFile = "cluster_" + std::to_string(clusterID) + "/" + clusterSubdirectory + "/" + user + "_follow_list.txt";
         if (file_contains_user(followListFile, std::to_string(id))) {
             std::ofstream feed(followingFile,std::ios::app|std::ios::out|std::ios::in);
             for (int i = previousTimelineSize; i < timeline.size(); i++) {
@@ -544,7 +547,7 @@ std::vector<std::string> getFollowersOfUser(int ID) {
     std::vector<std::string> usersInCluster = get_all_users_func(synchID);
 
     for (auto userID : usersInCluster) { // Examine each user's following file
-        std::string file = "cluster_" + std::to_string(clusterID) + "/1/" + userID + "_follow_list.txt";
+        std::string file = "cluster_" + std::to_string(clusterID) + "/" + clusterSubdirectory + "/" + userID + "_follow_list.txt";
         //std::cout << "Reading file " << file << std::endl;
         if (file_contains_user(file, clientID)) {
             followers.push_back(userID);

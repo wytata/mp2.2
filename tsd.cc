@@ -308,12 +308,10 @@ class SNSServiceImpl final : public SNSService::Service {
       Reply duplicateReply;
       slave_stub_->Login(&duplicateContext, duplicateRequest, &duplicateReply);
     } else {
-      std::cout << "GO STUPID RAHHH" << std::endl;
     }
     Client* c = new Client();
     std::string username = request->username();
     log(INFO, "Serving Login Request: " + username + "\n");
-    std::cout << "Server cluster ID: " << clusterId << std::endl;
     
     int user_index = find_user(username);
     if(user_index < 0){
@@ -435,7 +433,7 @@ class SNSServiceImpl final : public SNSService::Service {
           // Send latest 20 messages to client via the grpc stream
           for (const std::string& msg : latestMessages) {
               Message latestMessage;
-              latestMessage.set_msg(msg + "\n");
+              latestMessage.set_msg(msg);
               stream->Write(latestMessage);
           }
           firstTimelineStream = false;
@@ -474,6 +472,7 @@ class SNSServiceImpl final : public SNSService::Service {
               if (slave_stub_ != NULL && isMaster) {
                 std::cout << "calling SlaveTimelineUpdate" << std::endl;
                 const Status s = slave_stub_->SlaveTimelineUpdate(&slaveContext, slaveMessage, &slaveReply);
+                std::cout << slaveReply.msg() << std::endl;
                 if (!s.ok()) {
                   std::cout << std::to_string(s.error_code()) << std::endl;
                   std::cout << "Couldn't execute slave update" << std::endl;
